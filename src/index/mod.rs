@@ -109,7 +109,7 @@ impl EmailIndex {
             .field("date", STRING | STORED)
             .field("body", TEXT);
 
-        let store = IndexStore::open_with_heap(&tantivy_path, spec, 50_000_000)?;
+        let store = IndexStore::open_with_heap(&tantivy_path, &spec, 50_000_000)?;
 
         tracing::info!(path = %tantivy_path.display(), "Tantivy index opened");
 

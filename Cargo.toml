@@ -75,7 +75,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 arc-swap = "1.8"
 
 # Local index — sakuin (tantivy wrapper) for full-text search, SeaORM for structured metadata
-sakuin = { path = "../sakuin" }
+sakuin = { git = "ssh://git@github.com/pleme-io/sakuin" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 sea-orm = { version = "1", features = [
   "sqlx-sqlite",
