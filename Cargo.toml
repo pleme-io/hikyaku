@@ -1,0 +1,101 @@
+[package]
+name = "hikyaku"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+description = "Hikyaku — GPU-rendered terminal email client with MCP and scripting"
+homepage = "https://github.com/pleme-io/hikyaku"
+repository = "https://github.com/pleme-io/hikyaku"
+readme = "README.md"
+license = "MIT"
+categories = ["command-line-utilities", "email"]
+keywords = ["email", "tui", "terminal", "imap", "mcp"]
+
+[lints.clippy]
+pedantic = "warn"
+
+[profile.release]
+codegen-units = 1
+lto = true
+
+[dependencies]
+# TUI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui-image = "5"
+
+# Email
+async-imap = { version = "0.10", default-features = false, features = [
+  "runtime-tokio",
+] }
+tokio-native-tls = "0.3"
+native-tls = "0.2"
+lettre = { version = "0.11", default-features = false, features = [
+  "tokio1-native-tls",
+  "builder",
+  "smtp-transport",
+] }
+imap-proto = "0.16"
+mail-parser = "0.9"
+
+# OAuth2 (direct HTTP for device flow)
+reqwest = { version = "0.12", features = ["json"] }
+
+# Configuration (shikumi for discovery + hot-reload)
+shikumi = { git = "https://github.com/pleme-io/shikumi" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# MCP server
+rmcp = { version = "0.15", features = ["server", "transport-io"] }
+schemars = "0.8"
+
+# Scripting
+rhai = { version = "1.23", features = ["sync"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Image processing
+image = "0.25"
+
+# HTML rendering (Ghostty GPU rendering via headless Chrome)
+chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Concurrency
+arc-swap = "1.8"
+
+# Local index — sakuin (tantivy wrapper) for full-text search, SeaORM for structured metadata
+sakuin = { path = "../sakuin" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+sea-orm = { version = "1", features = [
+  "sqlx-sqlite",
+  "runtime-tokio-native-tls",
+  "macros",
+] }
+sea-orm-migration = "1"
+dirs-next = "2"
+chrono = { version = "0.4", features = ["serde"] }
+
+# gRPC (local indexing service)
+tonic = "0.12"
+prost = "0.13"
+
+# Browser open (OAuth2 flow)
+open = "5"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+[build-dependencies]
+tonic-build = "0.12"
