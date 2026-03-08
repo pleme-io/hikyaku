@@ -46,7 +46,7 @@ Hot-reload via shikumi's `ConfigStore::load_and_watch()`.
 
 ### MCP Server
 
-9 tools exposed via rmcp (stdio transport), following the karakuri pattern:
+9 tools exposed via rmcp (stdio transport), following the ayatsuri pattern:
 - `list_accounts`, `list_mailboxes`, `list_messages`, `read_message`
 - `search_messages`, `send_message`, `move_message`, `delete_message`
 - `run_script` (execute Rhai automation)
@@ -117,6 +117,6 @@ Hot-reload supported. Built-in functions:
 ## Patterns from Ecosystem
 
 - **Shikumi pattern**: ConfigDiscovery -> ProviderChain -> ConfigStore (from shikumi)
-- **Karakuri MCP pattern**: rmcp with tool_router/tool_handler macros (from karakuri)
-- **Karakuri scripting pattern**: Rhai with registered builtins (from karakuri)
-- **Karakuri HM module pattern**: settings -> YAML, scripting -> .rhai files (from karakuri)
+- **Ayatsuri MCP pattern**: rmcp with tool_router/tool_handler macros (from ayatsuri)
+- **Ayatsuri scripting pattern**: Rhai with registered builtins (from ayatsuri)
+- **Ayatsuri HM module pattern**: settings -> YAML, scripting -> .rhai files (from ayatsuri)
