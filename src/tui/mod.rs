@@ -1,23 +1,28 @@
+//! Hikyaku TUI — sidebar | message list | preview, plus a status bar.
+//!
+//! Rendered through [`egaku-term`](https://github.com/pleme-io/egaku-term):
+//! the renderer borrows stdout (lifecycle is managed by `Terminal::enter`),
+//! each pane is a [`bordered_block_with`] + manually-painted body inside
+//! [`block_inner`], and the status bar is a [`status_line_with`].
+//!
+//! The async event loop stays in this module — egaku-term's sync `App`
+//! runtime would conflict with the async-imap/sync paths the binary will
+//! eventually drive. Drawers are sync; that's fine inside a tokio loop.
+
 pub mod app;
 pub mod theme;
 
-use std::io;
-
-use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-    ExecutableCommand,
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use egaku::Rect;
+use egaku_term::crossterm::{
+    QueueableCommand,
+    cursor::MoveTo,
+    style::{Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor},
 };
-use ratatui::{
-    Frame, Terminal,
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
-    text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
-};
+use egaku_term::{Terminal, draw, theme::Palette};
 
 use self::app::{App, Focus, View};
-use self::theme::Theme;
+use self::theme::{Style, Theme};
 use crate::config;
 
 pub async fn run() -> anyhow::Result<()> {
@@ -26,38 +31,27 @@ pub async fn run() -> anyhow::Result<()> {
 
     let mut app = App::new(theme, &cfg.accounts);
 
-    // Set up terminal
-    enable_raw_mode()?;
-    io::stdout().execute(EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
+    // egaku-term owns terminal lifecycle: raw mode + alt screen + hide
+    // cursor + Drop-safe restore (incl. on panic).
+    let mut term = Terminal::enter()?;
 
-    // Main loop
-    let result = run_loop(&mut terminal, &mut app).await;
-
-    // Restore terminal
-    disable_raw_mode()?;
-    io::stdout().execute(LeaveAlternateScreen)?;
-
-    result
+    run_loop(&mut term, &mut app).await
 }
 
-async fn run_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
-) -> anyhow::Result<()> {
+async fn run_loop(term: &mut Terminal, app: &mut App) -> anyhow::Result<()> {
     while app.running {
-        terminal.draw(|frame| draw(frame, app))?;
+        term.clear()?;
+        draw_frame(term, app)?;
+        term.flush()?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                // Ctrl+C always quits
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.code == KeyCode::Char('c')
                 {
                     app.running = false;
                     continue;
                 }
-
                 match app.view {
                     View::Inbox | View::Thread => handle_navigation_key(app, key.code),
                     View::Compose => handle_compose_key(app, key.code),
@@ -65,7 +59,6 @@ async fn run_loop(
             }
         }
     }
-
     Ok(())
 }
 
@@ -86,256 +79,285 @@ fn handle_navigation_key(app: &mut App, key: KeyCode) {
 }
 
 fn handle_compose_key(app: &mut App, key: KeyCode) {
-    match key {
-        KeyCode::Esc => app.exit_compose(),
-        _ => {
-            // TODO: handle text input for compose fields
-        }
+    if key == KeyCode::Esc {
+        app.exit_compose();
     }
 }
 
 // ── Drawing ──────────────────────────────────────────────────────────────────
 
-fn draw(frame: &mut Frame, app: &App) {
-    let size = frame.area();
+fn draw_frame(term: &mut Terminal, app: &App) -> anyhow::Result<()> {
+    let (cols, rows) = term.size().map_err(map_err)?;
+    if cols == 0 || rows == 0 {
+        return Ok(());
+    }
+    let cols_f = f32::from(cols);
+    let rows_f = f32::from(rows);
 
-    // Clear with background color
-    frame.render_widget(
-        Block::default().style(app.theme.background()),
-        size,
-    );
+    // Vertical: content (rows-1) | status (1)
+    let content_h = rows_f - 1.0;
 
-    // Main layout: sidebar | content | preview
-    let main_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(3),    // main content
-            Constraint::Length(1), // status bar
-        ])
-        .split(size);
+    // Horizontal: sidebar(24) | messages(min 30) | preview(rest)
+    let sidebar_w: f32 = 24.0;
+    let messages_w: f32 = ((cols_f - sidebar_w) * 0.4).max(30.0).min(cols_f - sidebar_w - 1.0);
+    let preview_w = cols_f - sidebar_w - messages_w;
 
-    let content_area = main_layout[0];
-    let status_area = main_layout[1];
+    fill_bg(term, app, cols, rows)?;
 
-    // Horizontal split: sidebar | messages | preview
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(24), // sidebar
-            Constraint::Min(30),   // message list
-            Constraint::Min(40),   // preview
-        ])
-        .split(content_area);
+    let sidebar = Rect::new(0.0, 0.0, sidebar_w, content_h);
+    let messages = Rect::new(sidebar_w, 0.0, messages_w, content_h);
+    let preview = Rect::new(sidebar_w + messages_w, 0.0, preview_w, content_h);
+    let status = Rect::new(0.0, content_h, cols_f, 1.0);
 
-    draw_sidebar(frame, app, columns[0]);
-    draw_message_list(frame, app, columns[1]);
-    draw_preview(frame, app, columns[2]);
-    draw_status_bar(frame, app, status_area);
+    draw_sidebar(term, app, sidebar)?;
+    draw_message_list(term, app, messages)?;
+    draw_preview(term, app, preview)?;
+    draw_status_bar(term, app, status)?;
+    Ok(())
 }
 
-fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
-    let is_focused = app.focus == Focus::Sidebar;
-    let border_style = if is_focused {
-        app.theme.border_focused()
-    } else {
-        app.theme.border()
-    };
+fn fill_bg(term: &mut Terminal, app: &App, cols: u16, rows: u16) -> anyhow::Result<()> {
+    let blank = " ".repeat(usize::from(cols));
+    term.out()
+        .queue(SetBackgroundColor(app.theme.bg()))?
+        .queue(SetForegroundColor(app.theme.fg()))?;
+    for r in 0..rows {
+        term.out().queue(MoveTo(0, r))?.queue(Print(&blank))?;
+    }
+    term.out().queue(ResetColor)?;
+    Ok(())
+}
 
-    let block = Block::default()
-        .title(" Accounts ")
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .style(app.theme.sidebar_bg());
+fn palette(theme: &Theme) -> Palette {
+    Palette {
+        background: theme.bg(),
+        foreground: theme.fg(),
+        accent: theme.accent(),
+        error: theme.error_color(),
+        warning: theme.warning_color(),
+        success: theme.success_color(),
+        selection: theme.selection_bg(),
+        muted: theme.fg_muted(),
+        border: theme.border_color(),
+    }
+}
 
-    let mut items = Vec::new();
+fn draw_sidebar(term: &mut Terminal, app: &App, rect: Rect) -> anyhow::Result<()> {
+    let pal = palette(&app.theme);
+    let focused = app.focus == Focus::Sidebar;
+    draw::bordered_block_with(term, rect, " Accounts ", focused, &pal).map_err(map_err)?;
 
+    let inner = draw::block_inner(rect);
+    let (ix, iy, iw, ih) = cells(inner);
+    if iw == 0 || ih == 0 {
+        return Ok(());
+    }
+
+    let mut row = 0u16;
     for (i, account) in app.accounts.iter().enumerate() {
-        let indicator = if i == app.selected_account {
-            "\u{25B6} "
-        } else {
-            "  "
-        };
-        let status = if account.connected { "\u{25CF}" } else { "\u{25CB}" };
+        if row >= ih {
+            break;
+        }
+        let indicator = if i == app.selected_account { "▶ " } else { "  " };
+        let status = if account.connected { "●" } else { "○" };
 
         let style = if i == app.selected_account {
             app.theme.sidebar_selected()
         } else {
             app.theme.sidebar_item()
         };
+        let line = format!("{indicator}{status} {}", account.name);
+        paint_styled(term, ix, iy + row, iw, &line, style)?;
+        row += 1;
 
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(format!("{indicator}{status} "), style),
-            Span::styled(&account.name, style),
-        ])));
-
-        // Show mailboxes for selected account
         if i == app.selected_account {
             for (j, mailbox) in account.mailboxes.iter().enumerate() {
-                let mb_style = if j == app.selected_mailbox {
+                if row >= ih {
+                    break;
+                }
+                let style = if j == app.selected_mailbox {
                     app.theme.sidebar_selected()
                 } else {
                     app.theme.sidebar_item()
                 };
-
                 let unread = if mailbox.unseen_count > 0 {
                     format!(" ({})", mailbox.unseen_count)
                 } else {
                     String::new()
                 };
-
-                items.push(ListItem::new(Line::from(vec![
-                    Span::styled("    ", mb_style),
-                    Span::styled(&mailbox.name, mb_style),
-                    Span::styled(unread, app.theme.accent()),
-                ])));
+                let line = format!("    {}{}", mailbox.name, unread);
+                paint_styled(term, ix, iy + row, iw, &line, style)?;
+                row += 1;
             }
         }
     }
-
-    let list = List::new(items).block(block);
-    frame.render_widget(list, area);
+    Ok(())
 }
 
-fn draw_message_list(frame: &mut Frame, app: &App, area: Rect) {
-    let is_focused = app.focus == Focus::MessageList;
-    let border_style = if is_focused {
-        app.theme.border_focused()
-    } else {
-        app.theme.border()
-    };
-
+fn draw_message_list(term: &mut Terminal, app: &App, rect: Rect) -> anyhow::Result<()> {
+    let pal = palette(&app.theme);
+    let focused = app.focus == Focus::MessageList;
     let title = format!(
         " {} - {} ",
-        app.current_account()
-            .map(|a| a.name.as_str())
-            .unwrap_or(""),
+        app.current_account().map_or("", |a| a.name.as_str()),
         app.current_mailbox_name()
     );
+    draw::bordered_block_with(term, rect, &title, focused, &pal).map_err(map_err)?;
 
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .style(app.theme.background());
-
-    if app.messages.is_empty() {
-        let empty = Paragraph::new("No messages")
-            .style(app.theme.text_muted())
-            .block(block);
-        frame.render_widget(empty, area);
-        return;
+    let inner = draw::block_inner(rect);
+    let (ix, iy, iw, ih) = cells(inner);
+    if iw == 0 || ih == 0 {
+        return Ok(());
     }
 
-    let items: Vec<ListItem> = app
-        .messages
-        .iter()
-        .enumerate()
-        .map(|(i, msg)| {
-            let is_selected = i == app.selected_message;
-            let base_style = if is_selected {
-                app.theme.message_selected()
-            } else if msg.is_read {
-                app.theme.message_read()
-            } else {
-                app.theme.message_unread()
-            };
+    if app.messages.is_empty() {
+        paint_styled(term, ix, iy, iw, "No messages", app.theme.text_muted())?;
+        return Ok(());
+    }
 
-            let indicator = if !msg.is_read { "\u{25CF} " } else { "  " };
-
-            ListItem::new(Line::from(vec![
-                Span::styled(indicator, base_style),
-                Span::styled(&msg.from, app.theme.message_sender()),
-                Span::styled(" - ", app.theme.text_muted()),
-                Span::styled(&msg.subject, base_style),
-                Span::styled(format!("  {}", msg.date), app.theme.message_date()),
-            ]))
-        })
-        .collect();
-
-    let list = List::new(items).block(block);
-    frame.render_widget(list, area);
+    for (i, msg) in app.messages.iter().enumerate().take(usize::from(ih)) {
+        let row = u16::try_from(i).unwrap_or(u16::MAX);
+        let is_selected = i == app.selected_message;
+        let base = if is_selected {
+            app.theme.message_selected()
+        } else if msg.is_read {
+            app.theme.message_read()
+        } else {
+            app.theme.message_unread()
+        };
+        let indicator = if msg.is_read { "  " } else { "● " };
+        let line = format!(
+            "{indicator}{} - {}  {}",
+            msg.from, msg.subject, msg.date
+        );
+        paint_styled(term, ix, iy + row, iw, &line, base)?;
+    }
+    Ok(())
 }
 
-fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
-    let is_focused = app.focus == Focus::Preview;
-    let border_style = if is_focused {
-        app.theme.border_focused()
-    } else {
-        app.theme.border()
+fn draw_preview(term: &mut Terminal, app: &App, rect: Rect) -> anyhow::Result<()> {
+    let pal = palette(&app.theme);
+    let focused = app.focus == Focus::Preview;
+    draw::bordered_block_with(term, rect, " Preview ", focused, &pal).map_err(map_err)?;
+
+    let inner = draw::block_inner(rect);
+    let (ix, iy, iw, ih) = cells(inner);
+    if iw == 0 || ih == 0 {
+        return Ok(());
+    }
+
+    if app.messages.is_empty() {
+        paint_styled(
+            term,
+            ix,
+            iy,
+            iw,
+            "Select a message to preview",
+            app.theme.text_muted(),
+        )?;
+        return Ok(());
+    }
+
+    let Some(msg) = app.messages.get(app.selected_message) else {
+        paint_styled(term, ix, iy, iw, "No message selected", app.theme.text_muted())?;
+        return Ok(());
     };
 
-    let block = Block::default()
-        .title(" Preview ")
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .style(app.theme.background());
-
-    if app.messages.is_empty() {
-        let empty = Paragraph::new("Select a message to preview")
-            .style(app.theme.text_muted())
-            .block(block);
-        frame.render_widget(empty, area);
-        return;
+    // Header rows
+    let mut row: u16 = 0;
+    for (label, value, body_style) in [
+        ("From: ", msg.from.as_str(), app.theme.text()),
+        ("Subject: ", msg.subject.as_str(), app.theme.text_bright()),
+        ("Date: ", msg.date.as_str(), app.theme.text_muted()),
+    ] {
+        if row >= ih {
+            return Ok(());
+        }
+        paint_styled(term, ix, iy + row, iw, label, app.theme.preview_header())?;
+        let label_w = u16::try_from(label.len()).unwrap_or(iw).min(iw);
+        if label_w < iw {
+            paint_styled(term, ix + label_w, iy + row, iw - label_w, value, body_style)?;
+        }
+        row += 1;
+    }
+    if row < ih {
+        row += 1; // blank line
     }
 
-    if let Some(msg) = app.messages.get(app.selected_message) {
-        // TODO: render full message with HTML via ImageRenderer when available
-        let content = vec![
-            Line::from(vec![
-                Span::styled("From: ", app.theme.preview_header()),
-                Span::styled(&msg.from, app.theme.text()),
-            ]),
-            Line::from(vec![
-                Span::styled("Subject: ", app.theme.preview_header()),
-                Span::styled(&msg.subject, app.theme.text_bright()),
-            ]),
-            Line::from(vec![
-                Span::styled("Date: ", app.theme.preview_header()),
-                Span::styled(&msg.date, app.theme.text_muted()),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(&msg.preview, app.theme.preview_body())),
-        ];
-
-        let paragraph = Paragraph::new(content)
-            .block(block)
-            .wrap(Wrap { trim: false })
-            .scroll((app.preview_scroll, 0));
-
-        frame.render_widget(paragraph, area);
-    } else {
-        let empty = Paragraph::new("No message selected")
-            .style(app.theme.text_muted())
-            .block(block);
-        frame.render_widget(empty, area);
+    // Body — wrap with egaku-term, scroll by `app.preview_scroll`.
+    let body_lines = draw::wrap_text(&msg.preview, iw);
+    let scroll = usize::from(app.preview_scroll);
+    for (i, line) in body_lines.iter().skip(scroll).enumerate() {
+        let r = row + u16::try_from(i).unwrap_or(u16::MAX);
+        if r >= ih {
+            break;
+        }
+        paint_styled(term, ix, iy + r, iw, line, app.theme.preview_body())?;
     }
+    Ok(())
 }
 
-fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_status_bar(term: &mut Terminal, app: &App, rect: Rect) -> anyhow::Result<()> {
+    let mut pal = palette(&app.theme);
+    pal.background = app.theme.surface_bg();
+    pal.foreground = app.theme.fg();
+    pal.selection = app.theme.surface_bg();
+
     let account_info = app
         .current_account()
-        .map(|a| format!(" {} ({}) ", a.name, a.address))
-        .unwrap_or_default();
+        .map_or(String::new(), |a| format!(" {} ({}) ", a.name, a.address));
+    let separator = if account_info.is_empty() { "" } else { " | " };
+    let status_msg = app.status_message.as_deref().unwrap_or("");
+    let left = format!("{account_info}{separator}{status_msg}");
+    let right = " q:quit  j/k:nav  Tab:focus  c:compose  ?:help ".to_string();
 
-    let help = " q:quit  j/k:nav  Tab:focus  c:compose  ?:help ";
-
-    let status = Line::from(vec![
-        Span::styled(account_info, app.theme.status_bar_accent()),
-        Span::styled(" | ", app.theme.status_bar()),
-        Span::styled(
-            app.status_message.as_deref().unwrap_or(""),
-            app.theme.status_bar(),
-        ),
-        Span::styled(
-            format!(
-                "{:>width$}",
-                help,
-                width = area.width as usize
-            ),
-            app.theme.status_bar(),
-        ),
-    ]);
-
-    let bar = Paragraph::new(status).style(app.theme.status_bar());
-    frame.render_widget(bar, area);
+    draw::status_line_with(term, rect, &left, &right, &pal).map_err(map_err)
 }
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+fn paint_styled(
+    term: &mut Terminal,
+    col: u16,
+    row: u16,
+    max: u16,
+    text: &str,
+    style: Style,
+) -> anyhow::Result<()> {
+    if max == 0 {
+        return Ok(());
+    }
+    let line: String = text.chars().take(usize::from(max)).collect();
+    term.out()
+        .queue(MoveTo(col, row))?
+        .queue(SetForegroundColor(style.fg))?;
+    if let Some(bg) = style.bg {
+        term.out().queue(SetBackgroundColor(bg))?;
+    }
+    if !matches!(style.attr, Attribute::Reset) {
+        term.out().queue(SetAttribute(style.attr))?;
+    }
+    term.out().queue(Print(line))?;
+    if !matches!(style.attr, Attribute::Reset) {
+        term.out().queue(SetAttribute(Attribute::Reset))?;
+    }
+    term.out().queue(ResetColor)?;
+    Ok(())
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn cells(rect: Rect) -> (u16, u16, u16, u16) {
+    let to_u16 = |f: f32| f.max(0.0).round().min(f32::from(u16::MAX)) as u16;
+    (
+        to_u16(rect.x),
+        to_u16(rect.y),
+        to_u16(rect.width),
+        to_u16(rect.height),
+    )
+}
+
+fn map_err(e: egaku_term::Error) -> anyhow::Error {
+    anyhow::anyhow!("{e}")
+}
+
+use crossterm::style::Attribute;

@@ -19,8 +19,11 @@ codegen-units = 1
 lto = true
 
 [dependencies]
-# TUI
-ratatui = "0.29"
+# TUI — egaku-term provides Terminal lifecycle + drawers; ratatui-image
+# stays for src/render/mod.rs (HTML→image preview, planned). ratatui
+# itself is pulled transitively by ratatui-image; not imported directly.
+egaku-term = { git = "https://github.com/pleme-io/egaku-term", tag = "v0.2.1" }
+egaku = { git = "https://github.com/pleme-io/egaku" }
 crossterm = { version = "0.28", features = ["event-stream"] }
 ratatui-image = "5"
 
@@ -75,7 +78,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 arc-swap = "1.8"
 
 # Local index — sakuin (tantivy wrapper) for full-text search, SeaORM for structured metadata
-sakuin = { git = "ssh://git@github.com/pleme-io/sakuin" }
+sakuin = { git = "https://github.com/pleme-io/sakuin", package = "tankyu" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 sea-orm = { version = "1", features = [
   "sqlx-sqlite",
